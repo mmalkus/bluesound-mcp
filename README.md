@@ -23,8 +23,26 @@ pip install -e .
 ## Configure your players
 
 Players are referred to by name everywhere (never by IP), so Hermes can
-say "woonkamer" instead of an address. Create
-`~/.config/bluesound-mcp/players.json`:
+say "woonkamer" instead of an address.
+
+### Zero config: auto-discovery
+
+If no `players.json` is set up, tools fall back to scanning the local
+network via SSDP/UPnP and confirming/naming each responder through its
+BluOS `/SyncStatus` endpoint — so `list_players()` and every other tool
+work out of the box, using whatever name you've already given the player
+in the BluOS Controller app. Call `discover_players()` any time to run
+this scan directly, e.g. to find IPs to pin in `players.json`.
+
+This requires being on the same subnet/broadcast domain as the players —
+it won't find anything across routers/VLANs, or from most container
+network setups without host networking, and depends on UDP multicast not
+being firewalled off. If that's your situation, use `players.json`
+instead.
+
+### Pinning players explicitly
+
+Create `~/.config/bluesound-mcp/players.json`:
 
 ```json
 {
@@ -74,7 +92,8 @@ the command (stdio) or URL (sse/streamable-http) above.
 
 | Tool | What it does |
 |---|---|
-| `list_players()` | List configured player names + host/port |
+| `list_players()` | List player names + host/port (configured, or auto-discovered if no config) |
+| `discover_players(timeout=3.0)` | Scan the network for BluOS players directly, regardless of config |
 | `get_status(player)` | Current track, artist, state, volume, etc. |
 | `get_group_status(player)` | Grouping info: leader/follower, who's grouped |
 | `play` / `pause` / `stop` / `skip` / `back(player)` | Transport control |

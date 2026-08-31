@@ -19,7 +19,7 @@ try:  # mcp < 2.0
 except ModuleNotFoundError:  # mcp >= 2.0 renamed FastMCP -> MCPServer
     from mcp.server.mcpserver import MCPServer as FastMCP
 
-from . import bluos_client, config
+from . import bluos_client, config, discovery
 
 logging.basicConfig(level=os.environ.get("BLUESOUND_MCP_LOG_LEVEL", "INFO"))
 logger = logging.getLogger("bluesound-mcp")
@@ -35,8 +35,13 @@ mcp = FastMCP(
 )
 
 
-def _address(player: str) -> config.PlayerAddress:
-    return config.resolve(player)
+async def _address(player: str) -> config.PlayerAddress:
+    try:
+        players = config.load_players()
+    except FileNotFoundError:
+        found = await discovery.discover_players_cached()
+        players = {p.name: config.PlayerAddress(host=p.host, port=p.port) for p in found}
+    return config.resolve(player, players)
 
 
 def _status_to_dict(status: Any) -> dict[str, Any]:
@@ -72,12 +77,36 @@ def _sync_status_to_dict(sync: Any) -> dict[str, Any]:
 # --- Player registry ---------------------------------------------------
 
 @mcp.tool()
-def list_players() -> list[dict[str, Any]]:
-    """List all configured Bluesound players by name, with their host and port."""
-    players = config.load_players()
+async def list_players() -> list[dict[str, Any]]:
+    """List Bluesound players by name, with their host and port. Uses
+    players.json if configured; otherwise falls back to a live network scan
+    (see discover_players()), so this works with zero setup."""
+    try:
+        players = config.load_players()
+    except FileNotFoundError:
+        found = await discovery.discover_players_cached()
+        return [
+            {"name": p.name, "host": p.host, "port": p.port, "model": p.model}
+            for p in found
+        ]
     return [
         {"name": name, "host": addr.host, "port": addr.port}
         for name, addr in sorted(players.items())
+    ]
+
+
+@mcp.tool()
+async def discover_players(timeout: float = 3.0) -> list[dict[str, Any]]:
+    """Scan the local network for BluOS players via SSDP/UPnP, independent of
+    players.json. Returns each player's own name (as set in the BluOS
+    Controller app), host, port, and model - handy for finding IPs to put in
+    players.json, or for checking what's on the network right now. Requires
+    being on the same subnet as the players; won't find anything across
+    routers/VLANs or most container network setups without host networking."""
+    found = await discovery.discover_players(timeout=timeout)
+    return [
+        {"name": p.name, "host": p.host, "port": p.port, "model": p.model}
+        for p in found
     ]
 
 
@@ -86,7 +115,7 @@ def list_players() -> list[dict[str, Any]]:
 @mcp.tool()
 async def get_status(player: str) -> dict[str, Any]:
     """Get what a player is currently doing: track, artist, playback state, volume, etc."""
-    addr = _address(player)
+    addr = await _address(player)
     async with Player(addr.host, addr.port) as p:
         status = await p.status()
     return _status_to_dict(status)
@@ -95,7 +124,7 @@ async def get_status(player: str) -> dict[str, Any]:
 @mcp.tool()
 async def get_group_status(player: str) -> dict[str, Any]:
     """Get a player's grouping info: whether it's leading or following a group, and who's in it."""
-    addr = _address(player)
+    addr = await _address(player)
     async with Player(addr.host, addr.port) as p:
         sync = await p.sync_status()
     return _sync_status_to_dict(sync)
@@ -106,7 +135,7 @@ async def get_group_status(player: str) -> dict[str, Any]:
 @mcp.tool()
 async def play(player: str) -> str:
     """Resume playback on a player. Only works from paused, not from stopped."""
-    addr = _address(player)
+    addr = await _address(player)
     async with Player(addr.host, addr.port) as p:
         return await p.play()
 
@@ -114,7 +143,7 @@ async def play(player: str) -> str:
 @mcp.tool()
 async def pause(player: str) -> str:
     """Pause playback on a player."""
-    addr = _address(player)
+    addr = await _address(player)
     async with Player(addr.host, addr.port) as p:
         return await p.pause()
 
@@ -122,7 +151,7 @@ async def pause(player: str) -> str:
 @mcp.tool()
 async def stop(player: str) -> str:
     """Stop playback on a player. Stopped playback can't be resumed with play() - start something new instead."""
-    addr = _address(player)
+    addr = await _address(player)
     async with Player(addr.host, addr.port) as p:
         return await p.stop()
 
@@ -130,7 +159,7 @@ async def stop(player: str) -> str:
 @mcp.tool()
 async def skip(player: str) -> None:
     """Skip to the next track in the play queue."""
-    addr = _address(player)
+    addr = await _address(player)
     async with Player(addr.host, addr.port) as p:
         await p.skip()
 
@@ -138,7 +167,7 @@ async def skip(player: str) -> None:
 @mcp.tool()
 async def back(player: str) -> None:
     """Go back to the previous track (or restart the current one, if it just started)."""
-    addr = _address(player)
+    addr = await _address(player)
     async with Player(addr.host, addr.port) as p:
         await p.back()
 
@@ -146,7 +175,7 @@ async def back(player: str) -> None:
 @mcp.tool()
 async def set_shuffle(player: str, enabled: bool) -> dict[str, Any]:
     """Turn shuffle on or off for the current play queue."""
-    addr = _address(player)
+    addr = await _address(player)
     async with Player(addr.host, addr.port) as p:
         queue = await p.shuffle(enabled)
     return {"shuffle": queue.shuffle, "length": queue.length}
@@ -163,7 +192,7 @@ async def set_volume(
 ) -> dict[str, Any]:
     """Get or set a player's volume (0-100). Call with no arguments to just read
     the current volume. Set tell_followers=True to also change grouped players' volume."""
-    addr = _address(player)
+    addr = await _address(player)
     async with Player(addr.host, addr.port) as p:
         vol = await p.volume(level=level, mute=mute, tell_followers=tell_followers)
     return {"volume": vol.volume, "db": vol.db, "mute": vol.mute}
@@ -175,8 +204,9 @@ async def set_volume(
 async def group_players(leader: str, followers: list[str]) -> list[dict[str, Any]]:
     """Group one or more players under a leader, for synchronized multi-room playback.
     leader and followers are player names as returned by list_players()."""
-    leader_addr = _address(leader)
-    paired = [PairedPlayer(ip=_address(name).host, port=_address(name).port) for name in followers]
+    leader_addr = await _address(leader)
+    follower_addrs = [await _address(name) for name in followers]
+    paired = [PairedPlayer(ip=addr.host, port=addr.port) for addr in follower_addrs]
     async with Player(leader_addr.host, leader_addr.port) as p:
         result = await p.add_followers(paired)
     return [{"ip": f.ip, "port": f.port} for f in result]
@@ -185,8 +215,9 @@ async def group_players(leader: str, followers: list[str]) -> list[dict[str, Any
 @mcp.tool()
 async def ungroup_players(leader: str, followers: list[str]) -> dict[str, Any]:
     """Remove one or more followers from a leader's group. Leader and followers remain reachable individually."""
-    leader_addr = _address(leader)
-    paired = [PairedPlayer(ip=_address(name).host, port=_address(name).port) for name in followers]
+    leader_addr = await _address(leader)
+    follower_addrs = [await _address(name) for name in followers]
+    paired = [PairedPlayer(ip=addr.host, port=addr.port) for addr in follower_addrs]
     async with Player(leader_addr.host, leader_addr.port) as p:
         sync = await p.remove_followers(paired)
     return _sync_status_to_dict(sync)
@@ -196,7 +227,7 @@ async def ungroup_players(leader: str, followers: list[str]) -> dict[str, Any]:
 async def ungroup_player(player: str) -> dict[str, Any]:
     """Fully remove a player from whatever group it's in, whether it's the leader
     (this disbands the group) or a follower (this just detaches it)."""
-    addr = _address(player)
+    addr = await _address(player)
     async with Player(addr.host, addr.port) as p:
         sync = await p.sync_status()
 
@@ -218,7 +249,7 @@ async def ungroup_player(player: str) -> dict[str, Any]:
 @mcp.tool()
 async def list_presets(player: str) -> list[dict[str, Any]]:
     """List the saved presets (radio stations, playlists, inputs) available on a player."""
-    addr = _address(player)
+    addr = await _address(player)
     async with Player(addr.host, addr.port) as p:
         presets = await p.presets()
     return [{"id": pr.id, "name": pr.name, "url": pr.url} for pr in presets]
@@ -227,7 +258,7 @@ async def list_presets(player: str) -> list[dict[str, Any]]:
 @mcp.tool()
 async def load_preset(player: str, preset_id: int) -> None:
     """Start playing a preset by its numeric id (see list_presets())."""
-    addr = _address(player)
+    addr = await _address(player)
     async with Player(addr.host, addr.port) as p:
         await p.load_preset(preset_id)
 
@@ -239,7 +270,7 @@ async def browse(player: str, key: str | None = None) -> dict[str, Any]:
     """Browse a player's music sources. With no key, lists top-level sources
     (TIDAL, TuneIn, Library, Playlists, inputs, ...). Pass a browse_key from a
     previous browse() or search_service() result to descend into it."""
-    addr = _address(player)
+    addr = await _address(player)
     async with aiohttp.ClientSession() as session:
         result = await bluos_client.browse(session, addr.host, addr.port, key=key)
     return {
@@ -257,7 +288,7 @@ async def search_service(player: str, service: str, query: str) -> dict[str, Any
     (case-insensitive, partial) against the top-level source names from browse().
     Results carry a play_url (pass to play_item()) or a browse_key (pass to
     browse(), e.g. to see an album's tracks) depending on the item type."""
-    addr = _address(player)
+    addr = await _address(player)
     async with aiohttp.ClientSession() as session:
         result = await bluos_client.search_service(session, addr.host, addr.port, service, query)
     return {
@@ -270,7 +301,7 @@ async def search_service(player: str, service: str, query: str) -> dict[str, Any
 async def play_item(player: str, play_url: str) -> str:
     """Start playing an item found via browse() or search_service(), using its
     play_url. This clears the current queue and starts playing immediately."""
-    addr = _address(player)
+    addr = await _address(player)
     async with aiohttp.ClientSession() as session:
         return await bluos_client.play_item(session, addr.host, addr.port, play_url)
 
