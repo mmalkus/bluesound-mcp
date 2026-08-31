@@ -28,17 +28,19 @@ say "woonkamer" instead of an address.
 ### Zero config: auto-discovery
 
 If no `players.json` is set up, tools fall back to scanning the local
-network via SSDP/UPnP and confirming/naming each responder through its
-BluOS `/SyncStatus` endpoint — so `list_players()` and every other tool
-work out of the box, using whatever name you've already given the player
-in the BluOS Controller app. Call `discover_players()` any time to run
-this scan directly, e.g. to find IPs to pin in `players.json`.
+network for BluOS players — via SSDP/UPnP plus a direct port-11000 sweep
+of the local subnet — and confirming/naming each responder through its
+BluOS `/SyncStatus` endpoint. Both are needed: some players never answer
+SSDP at all, so the port sweep is what actually finds them, while SSDP
+just gets faster results for players that do respond. Either way,
+`list_players()` and every other tool work out of the box, using whatever
+name you've already given the player in the BluOS Controller app. Call
+`discover_players()` any time to run this scan directly, e.g. to find IPs
+to pin in `players.json`.
 
-This requires being on the same subnet/broadcast domain as the players —
-it won't find anything across routers/VLANs, or from most container
-network setups without host networking, and depends on UDP multicast not
-being firewalled off. If that's your situation, use `players.json`
-instead.
+This requires being on the same subnet as the players — it won't find
+anything across routers/VLANs, or from most container network setups
+without host networking.
 
 ### Pinning players explicitly
 

@@ -2,11 +2,18 @@
 
 BluOS players advertise themselves over UPnP/SSDP, but SSDP alone doesn't
 tell us a responder is actually a BluOS player, or what name you've given
-it in the BluOS Controller app. So discovery is two steps: broadcast an
-SSDP M-SEARCH to find candidate hosts, then confirm and name each one by
-querying its BluOS /SyncStatus endpoint directly - the same endpoint
-pyblu uses for status, and always on port 11000 regardless of whatever
-port the SSDP response advertised.
+it in the BluOS Controller app. So discovery has two parts: find candidate
+hosts, then confirm and name each one by querying its BluOS /SyncStatus
+endpoint directly - the same endpoint pyblu uses for status, and always on
+port 11000 regardless of whatever port the SSDP response advertised.
+
+Candidate hosts come from two sources run in parallel: an SSDP M-SEARCH,
+and a direct port-11000 sweep of the local /24. SSDP alone isn't reliable
+here - some BluOS players (observed: PULSE 2i, a DALI SOUND HUB acting as
+a BluOS receiver) never answer any SSDP query on this network, real or
+generic, while other non-BluOS devices happily do. The port sweep is the
+fallback that actually finds those; SSDP just gets us there faster for
+players that do respond.
 """
 from __future__ import annotations
 
@@ -30,9 +37,12 @@ _MSEARCH = (
     f"HOST: {SSDP_ADDR}:{SSDP_PORT}\r\n"
     'MAN: "ssdp:discover"\r\n'
     "MX: 2\r\n"
-    "ST: ssdp:all\r\n"
+    "ST: upnp:rootdevice\r\n"
     "\r\n"
 ).encode()
+
+_PORT_SCAN_TIMEOUT = 0.5
+_PORT_SCAN_CONCURRENCY = 100
 
 
 @dataclass(frozen=True)
@@ -92,6 +102,51 @@ async def _ssdp_hosts(timeout: float) -> set[str]:
     return hosts
 
 
+def _local_subnet_hosts() -> list[str]:
+    """Return every host IP in this machine's local /24, excluding itself.
+
+    Uses a UDP "connect" to a public IP purely to ask the OS which local
+    interface/address would be used for outbound traffic - no packet is
+    actually sent.
+    """
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        local_ip = s.getsockname()[0]
+    except OSError:
+        return []
+    finally:
+        s.close()
+
+    prefix = ".".join(local_ip.split(".")[:3])
+    return [f"{prefix}.{i}" for i in range(1, 255) if f"{prefix}.{i}" != local_ip]
+
+
+async def _port_open(host: str, port: int, timeout: float) -> str | None:
+    try:
+        _, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=timeout)
+    except (OSError, asyncio.TimeoutError):
+        return None
+    writer.close()
+    return host
+
+
+async def _port_scan_hosts(port: int = BLUOS_PORT) -> set[str]:
+    """Sweep the local /24 for hosts with `port` open - the fallback for
+    BluOS players that don't answer SSDP at all."""
+    hosts = _local_subnet_hosts()
+    if not hosts:
+        return set()
+    sem = asyncio.Semaphore(_PORT_SCAN_CONCURRENCY)
+
+    async def bounded(host: str) -> str | None:
+        async with sem:
+            return await _port_open(host, port, _PORT_SCAN_TIMEOUT)
+
+    results = await asyncio.gather(*(bounded(h) for h in hosts))
+    return {h for h in results if h is not None}
+
+
 async def _probe_bluos(
     session: aiohttp.ClientSession, host: str, timeout: float
 ) -> DiscoveredPlayer | None:
@@ -115,13 +170,17 @@ async def _probe_bluos(
 
 
 async def discover_players(timeout: float = 3.0, probe_timeout: float = 2.0) -> list[DiscoveredPlayer]:
-    """Find BluOS players on the local network via SSDP.
+    """Find BluOS players on the local network via SSDP plus a port-11000 sweep.
 
-    Requires the same subnet/broadcast domain (multicast doesn't cross
-    routers or most container network modes without host networking), and
-    that UDP multicast isn't firewalled off.
+    Requires being on the same /24 as the players - multicast doesn't cross
+    routers or most container network modes without host networking, and
+    neither approach reaches beyond the local subnet.
     """
-    hosts = await _ssdp_hosts(timeout)
+    ssdp_hosts, scanned_hosts = await asyncio.gather(
+        _ssdp_hosts(timeout),
+        _port_scan_hosts(),
+    )
+    hosts = ssdp_hosts | scanned_hosts
     if not hosts:
         return []
 
