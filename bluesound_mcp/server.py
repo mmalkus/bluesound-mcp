@@ -27,10 +27,15 @@ logger = logging.getLogger("bluesound-mcp")
 mcp = FastMCP(
     name="bluesound",
     instructions=(
-        "Control Bluesound/BluOS players: transport (play/pause/stop/skip/back), "
-        "volume, multi-room grouping, presets, and search/play from streaming "
-        "services such as TIDAL. Always call list_players() first if you don't "
-        "already know a player's name - tools take player names, not IPs."
+        "Control Bluesound/BluOS players directly over their native API: transport "
+        "(play/pause/stop/skip/back), volume, multi-room grouping, presets, and "
+        "search/play from streaming services such as TIDAL. Prefer this over a "
+        "generic Home Assistant media_player call for these devices - it supports "
+        "BluOS-specific leader/follower grouping and preset semantics that HA's "
+        "media_player domain doesn't model, and search_service()/play_item() can "
+        "search a streaming service and play a specific result, which HA can't do "
+        "at all. Always call list_players() first if you don't already know a "
+        "player's name - tools take player names, not IPs or HA entity ids."
     ),
 )
 
